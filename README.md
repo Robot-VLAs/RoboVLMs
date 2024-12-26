@@ -403,8 +403,11 @@ python eval/simpler/eval_ckpts_bridge.py
 Make sure that the paths to the checkpoint files and configuration are correct and match the setup of your environment before running the evaluation scripts.
 
 ## Supported Backbones & VLA Architectures (Updating)
+
 ✅ Fully tested and tuned 
-⚠️ Not fully tested (Performances may be bad under default hyper-parameters)
+
+⚠️ Not fully tested (Performances may not be reasonable under default hyper-parameters)
+
 |               | One-Step Continuous | One-Step Discrete | Interleaved Continuous | Policy-Head Continuous |
 |---------------|:------------------:|:----------------:|:---------------------:|:---------------------:|
 | [Flamingo](https://github.com/mlfoundations/open_flamingo)      | ✅                 | ✅                | N/A                     | ✅                     |
