@@ -4,7 +4,7 @@
     "task_name": "calvin_finetune",
     "model": "qwen",
     "model_path": ".vlms/Qwen-VL",
-    "model_url": "https://huggingface.co/Qwen/Qwen-VL",
+    "model_url": "https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct",
     "model_config": ".vlms/Qwen-VL/config.json",
     "seq_len": 1,
     "image_size": 448,
@@ -104,6 +104,7 @@
     "vlm": {
         "type": "AutoModelForCausalLM",
         "pretrained_model_name_or_path": ".vlms/Qwen-VL",
+        "trust_remote_code": true,
         "name": "qwen"
     },
     "trainer": {

@@ -95,6 +95,31 @@ def update_tokenizer(tokenizer, tokenizer_config):
     # print(tokenizer_config)
     tokenizer_type = tokenizer_config.get("type")
     new_tokens = tokenizer_config.get("additional_special_tokens", None)
+    
+    # Handle processors with wrapped tokenizers (like Qwen2VLProcessor)
+    if hasattr(tokenizer, 'tokenizer'):
+        print(f"Detected processor type: {type(tokenizer).__name__}")
+        inner_tokenizer = tokenizer.tokenizer
+        
+        # Apply any tokenizer updates to the inner tokenizer
+        if new_tokens is not None and len(new_tokens) > 0:
+            inner_tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
+            
+        # Set pad token if needed
+        if inner_tokenizer.pad_token is None:
+            try:
+                inner_tokenizer.pad_token_id = inner_tokenizer.eod_id
+            except:
+                try:
+                    inner_tokenizer.add_special_tokens({"pad_token": "<PAD>"})
+                except:
+                    print(f"Using eos_token as pad_token for inner tokenizer")
+                    inner_tokenizer.pad_token = inner_tokenizer.eos_token
+        
+        assert inner_tokenizer.vocab_size < 2**18
+        return tokenizer  # Return the original processor
+    
+    # Original code for standard tokenizers
     if new_tokens is not None and len(new_tokens) > 0:
         tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
 

@@ -1,0 +1,10 @@
+Collecting transformers
+  Downloading transformers-4.46.3-py3-none-any.whl.metadata (44 kB)
+Downloading transformers-4.46.3-py3-none-any.whl (10.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.0/10.0 MB 61.6 MB/s eta 0:00:00
+Installing collected packages: transformers
+  Attempting uninstall: transformers
+    Found existing installation: transformers 4.37.2
+    Uninstalling transformers-4.37.2:
+      Successfully uninstalled transformers-4.37.2
+Successfully installed transformers-4.46.3
