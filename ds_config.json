@@ -1,0 +1,13 @@
+{
+  "zero_optimization": {
+    "stage": 3,
+    "contiguous_gradients": true,
+    "overlap_comm": true,
+    "reduce_bucket_size": 1e8,
+    "stage3_param_persistence_threshold": 1e5
+  },
+  "bf16": {
+    "enabled": true
+  },
+  "train_micro_batch_size_per_gpu": 1
+} 
