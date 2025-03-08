@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import inspect
 
+
 from robovlms.model.backbone.base_backbone import BaseRoboVLM, load_config, deep_update
 
 logger = logging.getLogger(__name__)
@@ -134,249 +135,35 @@ class RoboQwen(BaseRoboVLM):
         
         return tokenizer, backbone
 
-    def _make_square(self, tensor):
-        """Make a tensor square by padding the shorter dimension."""
-        if tensor.shape[-2] == tensor.shape[-1]:
-            return tensor  # Already square
-            
-        size = max(tensor.shape[-2], tensor.shape[-1])
-        result = torch.zeros(
-            *tensor.shape[:-2], size, size,
-            device=tensor.device, dtype=tensor.dtype
+    def encode_images(self, images):
+        """Process images with Qwen-VL vision tower"""
+      
+        # input: images: list of b,c,h,w or b,t,c,h,w
+        # output: image_features: list of bx[txn, d]
+        if images.ndim == 4:
+            images = images.unsqueeze(1)
+        bs, seq_len = images.shape[:2]
+        if type(images) is list or images.ndim == 5:
+            if type(images) is list:
+                images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
+            images = torch.cat([image for image in images], dim=0)
+        image_features = self.image_processor(images)
+        image_features = image_features.view(
+            bs, seq_len, -1, image_features[0].shape[-1]
         )
-        
-        # Center the original image in the square tensor
-        h_offset = (size - tensor.shape[-2]) // 2
-        w_offset = (size - tensor.shape[-1]) // 2
-        
-        if len(tensor.shape) == 5:  # [batch, seq, c, h, w]
-            result[:, :, :, h_offset:h_offset+tensor.shape[-2], w_offset:w_offset+tensor.shape[-1]] = tensor
-        elif len(tensor.shape) == 4:  # [batch, c, h, w]
-            result[:, :, h_offset:h_offset+tensor.shape[-2], w_offset:w_offset+tensor.shape[-1]] = tensor
-        
-        return result
+        # import pdb; pdb.set_trace()
+        if self.use_vision_resampler:
+            ### downsample at token num dim: b, s, n, d -> b, s, v d
+            # b T F v d -> b, T, n, d
+            image_features = self.vision_resampler(
+                image_features.unsqueeze(2)
+            )  # downsample v_tok per image to n_tok
 
-    def model_encode_images(self, images):
-        """
-        Process images using Qwen2-VL's vision model.
-        
-        Args:
-            images: Images tensor of shape [batch, seq, c, h, w] or [batch, c, h, w]
-            
-        Returns:
-            Image features tensor
-        """
-        # First make sure we have square images for CALVIN
-        images = self._ensure_square(images)
-        
-        # Extensive logging for debugging
-        logger.info(f"Processing images with shape: {images.shape}")
-        logger.info(f"Vision model type: {type(self.vision_tower).__name__}")
-        
-        # Handle 5D inputs (batch, seq_len, c, h, w)
-        if images.dim() == 5:
-            batch_size, seq_len, c, h, w = images.shape
-            
-            # Reshape to [batch*seq, c, h, w] for processing
-            flat_images = images.reshape(-1, c, h, w)
-            
-            try:
-                # Attempt to process with vision model
-                # First try without grid_thw
-                image_features = self.vision_tower(flat_images)
-                logger.info(f"Vision tower output type: {type(image_features).__name__}")
-                
-                # Handle different output formats
-                if isinstance(image_features, dict) and 'last_hidden_state' in image_features:
-                    image_features = image_features['last_hidden_state']
-                    logger.info("Extracted last_hidden_state from dict output")
-                
-                # Log shape for debugging
-                logger.info(f"Raw features shape: {image_features.shape}")
-                
-                # Reshape back to include sequence dimension
-                if image_features.dim() > 2:
-                    num_patches = image_features.shape[1]
-                    feat_dim = image_features.shape[-1]
-                    image_features = image_features.reshape(batch_size, seq_len, num_patches, feat_dim)
-                else:
-                    # Handle case where output is already pooled to [batch*seq, hidden_dim]
-                    feat_dim = image_features.shape[-1]
-                    image_features = image_features.reshape(batch_size, seq_len, 1, feat_dim)
-                
-                logger.info(f"Final features shape: {image_features.shape}")
-                return image_features
-                
-            except Exception as e:
-                logger.error(f"Error processing images: {e}")
-                logger.info("Falling back to using image processor and then processing")
-                
-                try:
-                    # Let's use the image processor first
-                    processed_images = []
-                    for i in range(flat_images.shape[0]):
-                        img = flat_images[i].detach().cpu()
-                        processed = self.image_processor(img, return_tensors="pt").to(images.device)
-                        processed_images.append(processed["pixel_values"])
-                    
-                    processed_batch = torch.cat(processed_images, dim=0)
-                    image_features = self.vision_tower(processed_batch)
-                    
-                    # Extract features and reshape
-                    if isinstance(image_features, dict) and 'last_hidden_state' in image_features:
-                        image_features = image_features['last_hidden_state']
-                    
-                    # Reshape back to include sequence dimension
-                    if image_features.dim() > 2:
-                        num_patches = image_features.shape[1]
-                        feat_dim = image_features.shape[-1]
-                        image_features = image_features.reshape(batch_size, seq_len, num_patches, feat_dim)
-                    else:
-                        feat_dim = image_features.shape[-1]
-                        image_features = image_features.reshape(batch_size, seq_len, 1, feat_dim)
-                    
-                    return image_features
-                    
-                except Exception as e2:
-                    logger.error(f"All processing methods failed: {e}, {e2}")
-                    # Return zeros as emergency fallback
-                    feature_dim = self.hidden_size
-                    return torch.zeros(
-                        (batch_size, seq_len, 1, feature_dim), 
-                        device=images.device, 
-                        dtype=images.dtype
-                    )
-        else:
-            # Similar logic for 4D inputs
-            batch_size, c, h, w = images.shape
-            
-            try:
-                # Process with vision model
-                image_features = self.vision_tower(images)
-                
-                # Handle different output formats
-                if isinstance(image_features, dict) and 'last_hidden_state' in image_features:
-                    image_features = image_features['last_hidden_state']
-                
-                # Add sequence dimension
-                if image_features.dim() > 2:
-                    image_features = image_features.unsqueeze(1)
-                else:
-                    image_features = image_features.unsqueeze(1).unsqueeze(1)
-                
-                return image_features
-                
-            except Exception as e:
-                logger.error(f"Error processing single images: {e}")
-                # Return zeros as emergency fallback
-                feature_dim = self.hidden_size
-                return torch.zeros(
-                    (batch_size, 1, 1, feature_dim), 
-                    device=images.device, 
-                    dtype=images.dtype
-                )
-    
-    def _ensure_square(self, images):
-        """Make sure images are square (needed for CALVIN)"""
-        if images.shape[-2] == images.shape[-1]:
-            return images  # Already square
-            
-        size = max(images.shape[-2], images.shape[-1])
-        if images.dim() == 5:  # [batch, seq, c, h, w]
-            _, _, c, h, w = images.shape
-            result = torch.zeros(
-                *images.shape[:-2], size, size,
-                device=images.device, dtype=images.dtype
-            )
-            h_offset = (size - h) // 2
-            w_offset = (size - w) // 2
-            result[:, :, :, h_offset:h_offset+h, w_offset:w_offset+w] = images
-        else:  # [batch, c, h, w]
-            _, c, h, w = images.shape
-            result = torch.zeros(
-                *images.shape[:-2], size, size,
-                device=images.device, dtype=images.dtype
-            )
-            h_offset = (size - h) // 2
-            w_offset = (size - w) // 2
-            result[:, :, h_offset:h_offset+h, w_offset:w_offset+w] = images
-            
-        return result
-
-    def _process_single_image(self, img):
-        """Process a single image tensor to extract features, ensuring square output"""
-        try:
-            # Ensure image has batch dimension
-            img = img.unsqueeze(0)  # [1, c, h, w]
-            
-            # Check if image is square, if not make it square
-            c, h, w = img.shape[1:]
-            if h != w:
-                logger.info(f"Making image square from {h}x{w} to {max(h,w)}x{max(h,w)}")
-                size = max(h, w)
-                square_img = torch.zeros(1, c, size, size, device=img.device, dtype=img.dtype)
-                h_offset = (size - h) // 2
-                w_offset = (size - w) // 2
-                square_img[:, :, h_offset:h_offset+h, w_offset:w_offset+w] = img
-                img = square_img
-            
-            # Create grid_thw tensor - ensure it represents a square grid
-            grid_size = img.shape[2] // 16  # Using patch size of 16
-            grid_thw = torch.tensor([[1, grid_size, grid_size]], device=img.device, dtype=torch.int64)
-            
-            # Process through vision tower
-            features = self.vision_tower(img, grid_thw=grid_thw)
-            
-            # Return the features without batch dimension
-            if features.dim() > 1:
-                # Average across spatial dimensions if needed
-                if features.dim() > 2:
-                    features = features.mean(dim=1)
-                # Remove batch dimension
-                features = features.squeeze(0)
-            
-            return features
-        
-        except Exception as e:
-            logger.error(f"Error in single image processing: {e}")
-            
-            # Try alternative approach
-            try:
-                # Try to use an even simpler approach
-                # Get the pixel values directly from the image - simplify to grayscale
-                if img.shape[0] == 3:  # RGB
-                    gray = img.mean(dim=0, keepdim=True)  # [1, h, w]
-                else:
-                    gray = img
-                
-                # Flatten and project to feature dimension
-                flat = gray.flatten()
-                
-                # Create a simple feature projection if needed
-                if not hasattr(self, '_emergency_projection'):
-                    feat_dim = 1024
-                    if hasattr(self.model, 'config') and hasattr(self.model.config, 'hidden_size'):
-                        feat_dim = self.model.config.hidden_size
-                    
-                    self._emergency_projection = nn.Linear(flat.shape[0], feat_dim).to(img.device).to(img.dtype)
-                    # Initialize with small random values
-                    with torch.no_grad():
-                        self._emergency_projection.weight.data.normal_(0, 0.01)
-                        self._emergency_projection.bias.data.zero_()
-                
-                # Project to feature dimension
-                features = self._emergency_projection(flat)
-                
-                logger.warning("Using emergency feature projection as fallback")
-                return features
-                
-            except Exception as e2:
-                logger.error(f"Alternative approach failed: {e2}")
-                raise ValueError(f"Failed to process image: {e}, {e2}")
+        return image_features
 
 if __name__ == "__main__":
     configs = load_config(
-        "configs/calvin_finetune/finetune_qwen-vl-7b_cont-lstm-post_full_ft_text_vision_wd=0_hist=8_act=10_aug-shift_act-norm.json"
+        "configs/calvin_finetune/qwen.json"
     )
     use_hand_rgb = False  # True
     model = RoboQwen(
@@ -393,7 +180,7 @@ if __name__ == "__main__":
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     print(f"Qwen Model Parameters: {total_params / 1000000:.2f}M")
-    bs, seq_len = 2, 4
+    bs, seq_len = 3, 8
     device = "cuda:0"
     model = model.to(device)
     # device = 'cpu'
@@ -402,6 +189,8 @@ if __name__ == "__main__":
     vision_x = torch.zeros(
         (bs, seq_len, 3, img_size, img_size), dtype=torch.float16
     ).to(device)
+    print("\n[TEST] Vision input shape:", vision_x.shape)  # <-- Add this
+    print("[TEST] Vision input dimensions:", vision_x.ndim)  # <-- Add this
     vision_gripper = torch.zeros(
         (bs, seq_len, 3, img_size, img_size), dtype=torch.float16
     ).to(device)
@@ -428,7 +217,7 @@ if __name__ == "__main__":
         fwd_rgb_labels=None,
         fwd_hand_rgb_labels=None,
         fwd_mask=None,
-        data_source="action",
+        data_source="calvin_action",
     )
 
     print(test_res)

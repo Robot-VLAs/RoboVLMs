@@ -338,30 +338,19 @@ def get_text_function(tokenizer, tokenizer_type, max_length=256):
         return functools.partial(preprocess_text_llava, tokenizer=tokenizer)
     elif tokenizer_type == "qwen":
 
-        def preprocess_text_qwen(texts, tokenizer):
-            """
-            Preprocess text for Qwen2-VL model
-            """
-            # Fix for Qwen2TokenizerFast which doesn't have eod_id
-            if hasattr(tokenizer, 'eod_id'):
-                tokenizer.pad_token_id = tokenizer.eod_id
-            else:
-                # For Qwen2TokenizerFast, use eos_token_id instead
-                tokenizer.pad_token_id = tokenizer.eos_token_id
-            
-            # Process all the texts
-            encodings_dict = tokenizer(
-                texts,
+        def preprocess_text_qwen(sample, tokenizer):
+            tokenizer.padding_side = "right"
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+            tokenizer.pad_token = tokenizer.eos_token
+            sample = [(f"{s.strip()}") for s in sample]
+            text = tokenizer(
+                sample,
+                truncation="only_first",
                 return_tensors="pt",
                 padding="longest",
-                truncation=True,
                 max_length=512,
             )
-
-            input_ids = encodings_dict["input_ids"]
-            attention_mask = encodings_dict["attention_mask"]
-            
-            return input_ids, attention_mask
+            return text["input_ids"], text["attention_mask"]
 
         return functools.partial(preprocess_text_qwen, tokenizer=tokenizer)
     elif tokenizer_type == "kosmos":
@@ -445,164 +434,24 @@ def get_text_function(tokenizer, tokenizer_type, max_length=256):
         return functools.partial(preprocess_text_default, tokenizer=tokenizer)
 
 
-def preprocess_image(sample, image_processor, model_type=None, **kwargs):
-    """
-    Preprocess images with the given image processor.
-    
-    Args:
-        sample: List of images to process
-        image_processor: Image processor from the model
-        model_type: Model type (for compatibility with existing code)
-        **kwargs: Additional arguments for flexibility
-        
-    Returns:
-        Processed image tensors compatible with the expected format
-    """
-    import torch
-    import logging
-    import inspect
-    from transformers.image_processing_utils import BatchFeature
-    
-    logger = logging.getLogger(__name__)
-    
-    # Ensure sample is in the right format
-    if not isinstance(sample, list):
-        sample = [sample]
-    
-    # Check if this is being called from CALVIN dataset
-    is_calvin = False
-    for frame in inspect.stack():
-        if 'calvin' in frame.filename.lower():
-            is_calvin = True
-            break
-    
-    try:
-        # Determine the processor type by checking specific attributes
-        processor_name = type(image_processor).__name__
-        is_qwen2 = 'Qwen2' in processor_name
-        
-        if is_qwen2:
-            logger.debug(f"Using Qwen2-VL processing with processor: {processor_name}")
-            
-            # Qwen2-VL requires return_tensors="pt" to get tensor outputs
-            processed_images = []
-            for img in sample:
-                # Process with explicit tensor return
-                result = image_processor(img, return_tensors="pt")
-                
-                # Extract pixel_values from BatchFeature
-                if isinstance(result, BatchFeature) and "pixel_values" in result:
-                    pixel_values = result["pixel_values"]
-                    
-                    # Calculate grid_thw for Qwen2-VL vision model
-                    # Note: This is needed for the forward pass of the vision model
-                    # The grid_thw should be calculated based on the image size and patch size
-                    # Typically patch size is 16 for vision transformers
-                    img_h, img_w = pixel_values.shape[-2], pixel_values.shape[-1]
-                    patch_size = 16  # Standard patch size for most vision models
-                    grid_h, grid_w = img_h // patch_size, img_w // patch_size
-                    
-                    # Store the grid_thw information with the tensor
-                    pixel_values.grid_thw = torch.tensor(
-                        [[1, grid_h, grid_w]], 
-                        dtype=torch.int64, 
-                        device=pixel_values.device
-                    )
-                    
-                    processed_images.append(pixel_values)
-                elif isinstance(result, dict) and "pixel_values" in result:
-                    pixel_values = result["pixel_values"]
-                    
-                    # Same grid_thw calculation for dict result
-                    img_h, img_w = pixel_values.shape[-2], pixel_values.shape[-1]
-                    patch_size = 16
-                    grid_h, grid_w = img_h // patch_size, img_w // patch_size
-                    
-                    pixel_values.grid_thw = torch.tensor(
-                        [[1, grid_h, grid_w]], 
-                        dtype=torch.int64, 
-                        device=pixel_values.device
-                    )
-                    
-                    processed_images.append(pixel_values)
-                else:
-                    logger.warning(f"Unexpected result from processor: {type(result)}")
-                    # Try to handle as is if it's already a tensor
-                    if torch.is_tensor(result):
-                        tensor = result.unsqueeze(0) if result.dim() == 3 else result
-                        
-                        # Add grid_thw information
-                        img_h, img_w = tensor.shape[-2], tensor.shape[-1]
-                        patch_size = 16
-                        grid_h, grid_w = img_h // patch_size, img_w // patch_size
-                        
-                        tensor.grid_thw = torch.tensor(
-                            [[1, grid_h, grid_w]], 
-                            dtype=torch.int64, 
-                            device=tensor.device
-                        )
-                        
-                        processed_images.append(tensor)
-            
-            # Combine results
-            if len(processed_images) > 1:
-                output = torch.cat(processed_images, dim=0)
-                
-                # Preserve grid_thw information
-                if hasattr(processed_images[0], 'grid_thw'):
-                    # For batched images, we need to adjust the first dimension of grid_thw
-                    grid_thw = processed_images[0].grid_thw.clone()
-                    grid_thw[:, 0] = len(processed_images)  # Update batch size
-                    output.grid_thw = grid_thw
-            else:
-                output = processed_images[0]
-            
-            # Ensure CALVIN gets the right format
-            if is_calvin and output.dim() == 4:  # [batch, c, h, w]
-                # For CALVIN, add sequence and camera dimensions
-                output = output.unsqueeze(1)  # [batch, 1, c, h, w]
-                output = output.unsqueeze(2)  # [batch, 1, 1, c, h, w]
-                
-                # Preserve grid_thw
-                if hasattr(output, 'grid_thw'):
-                    output.grid_thw = output.grid_thw
-            
-            logger.debug(f"Processed images with shape: {output.shape}")
-            if hasattr(output, 'grid_thw'):
-                logger.debug(f"With grid_thw: {output.grid_thw}")
-                
-            return output
-            
-        else:
-            # Original Qwen-VL approach
-            logger.debug("Using original Qwen-VL image processing approach")
-            try:
-                # Original processor returns tensor directly
-                processed = [image_processor(s).unsqueeze(0) for s in sample]
-                
-                if len(processed) > 1:
-                    output = torch.cat(processed, dim=0)
-                else:
-                    output = processed[0]
-                
-                # Also handle CALVIN format for original Qwen-VL
-                if is_calvin and output.dim() == 4:
-                    output = output.unsqueeze(1).unsqueeze(2)  # [batch, 1, 1, c, h, w]
-                    
-                return output
-                
-            except Exception as e:
-                logger.error(f"Original method failed with: {e}")
-                raise
-                
-    except Exception as e:
-        logger.error(f"Image processing failed: {e}")
-        
-        # Create an emergency fallback tensor
-        if is_calvin:
-            return torch.zeros((len(sample), 1, 1, 3, 224, 224), dtype=torch.float32)
-        else:
-            return torch.zeros((len(sample), 3, 224, 224), dtype=torch.float32)
+def preprocess_image(sample, image_processor, model_type):
+    # if model_type.lower() == 'flamingo':
+    #     image = [image_processor(s).unsqueeze(0) for s in sample]
+    #     image = torch.cat(image, dim=0)
+
+    # elif model_type == 'kosmos':
+    #     image = [image_processor(s, return_tensors="pt")['pixel_values'] for s in sample]
+    #     image = torch.cat(image, dim=0)
+  
+    image = [
+        image_processor(images=s, return_tensors="pt")["pixel_values"]
+        for s in sample
+    ]
+    image = torch.cat(image, dim=0)
+   
+    # apply random horizontal flip and color jitter
+    return image
+
 
 def order_pick_k(lst, k):
     if len(lst) <= k:
